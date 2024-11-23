@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>路線規劃與距離計算</title>
+    <style>
+        #map {
+            height: 400px;
+            width: 100%;
+            margin-bottom: 20px;
+        }
+        .controls {
+            margin: 20px 0;
+            padding: 20px;
+            background: #f5f5f5;
+            border-radius: 8px;
+        }
+        input {
+            margin: 10px 0;
+            padding: 8px;
+            width: 300px;
+        }
+        button {
+            padding: 10px 20px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-right: 10px;
+        }
+        button:disabled {
+            background: #cccccc;
+            cursor: not-allowed;
+        }
+        #output {
+            margin-top: 20px;
+            padding: 15px;
+            background: #e9e9e9;
+            border-radius: 4px;
+        }
+        #error-message {
+            color: red;
+            padding: 10px;
+            display: none;
+        }
+        #static-map {
+            max-width: 100%;
+            margin-top: 20px;
+            border: 1px solid #ccc;
+        }
+        .loading {
+            display: none;
+            margin: 10px 0;
+            color: #666;
+        }
+        .download-section {
+            margin-top: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .download-button {
+            background: #2196F3;
+            display: none;
+        }
+        .download-button:hover {
+            background: #1976D2;
+        }
+        #download-frame {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="error-message"></div>
+    <div class="controls">
+        <input id="start" type="text" placeholder="起點位置">
+        <input id="end" type="text" placeholder="終點位置">
+        <button id="calculate-button" disabled onclick="calculateRoute()">計算路線</button>
+    </div>
+    <div id="map"></div>
+    <div id="output"></div>
+    <div id="loading" class="loading">正在產生路線圖片...</div>
+    <div class="download-section">
+        <button id="download-button" class="download-button" onclick="downloadMap()">下載路線圖</button>
+        <input type="text" id="filename-input" placeholder="檔案名稱" style="display: none;">
+    </div>
+    <iframe id="download-frame" style="display:none;"></iframe>
+
+    <script>
+        let map;
+        let directionsService;
+        let directionsRenderer;
+        let currentMapUrl; // 儲存當前地圖URL
+        const API_KEY = 'YOUR_API_KEY'; // 請替換為你的 API 金鑰
+
+        function checkGoogleMapsApiLoaded() {
+            return typeof google !== 'undefined' && typeof google.maps !== 'undefined';
+        }
+
+        function showError(message) {
+            const errorDiv = document.getElementById('error-message');
+            errorDiv.style.display = 'block';
+            errorDiv.textContent = message;
+        }
+
+        function showLoading(show) {
+            document.getElementById('loading').style.display = show ? 'block' : 'none';
+        }
+
+        function showDownloadControls(show) {
+            document.getElementById('download-button').style.display = show ? 'block' : 'none';
+            document.getElementById('filename-input').style.display = show ? 'block' : 'none';
+            if (show) {
+                const now = new Date();
+                const defaultFilename = `route_map_${now.getFullYear()}${(now.getMonth()+1).toString().padStart(2,'0')}${now.getDate().toString().padStart(2,'0')}`;
+                document.getElementById('filename-input').value = defaultFilename;
+            }
+        }
+
+        function downloadMap() {
+            try {
+                const filename = document.getElementById('filename-input').value || 'route_map';
+                if (!currentMapUrl) {
+                    throw new Error('地圖 URL 不存在');
+                }
+
+                // 建立下載連結
+                const a = document.createElement('a');
+                a.href = currentMapUrl;
+                a.download = `${filename}.png`;
+                a.target = '_blank';
+                
+                // 使用新視窗開啟圖片
+                window.open(currentMapUrl, '_blank');
+                
+                // 告知使用者如何儲存圖片
+                alert('請在開啟的新視窗中，右鍵點擊圖片並選擇「另存新檔」來下載圖片。');
+                
+            } catch (error) {
+                showError('下載圖片時發生錯誤: ' + error.message);
+                console.error('Download error:', error);
+            }
+        }
+
+        function initMap() {
+            try {
+                if (!checkGoogleMapsApiLoaded()) {
+                    throw new Error('Google Maps API 尚未載入');
+                }
+
+                map = new google.maps.Map(document.getElementById('map'), {
+                    center: { lat: 23.5, lng: 121 },
+                    zoom: 7
+                });
+
+                directionsService = new google.maps.DirectionsService();
+                directionsRenderer = new google.maps.DirectionsRenderer();
+                directionsRenderer.setMap(map);
+
+                const startInput = document.getElementById('start');
+                const endInput = document.getElementById('end');
+                new google.maps.places.Autocomplete(startInput);
+                new google.maps.places.Autocomplete(endInput);
+
+                document.getElementById('calculate-button').disabled = false;
+
+            } catch (error) {
+                showError('初始化地圖失敗: ' + error.message);
+                console.error('Map initialization error:', error);
+            }
+        }
+
+        function generateStaticMapUrl(result) {
+            try {
+                const route = result.routes[0];
+                const legs = route.legs[0];
+                const start = legs.start_location;
+                const end = legs.end_location;
+                
+                const path = route.overview_path;
+                const pathPoints = [];
+                const step = Math.max(1, Math.floor(path.length / 8));
+                
+                for (let i = 0; i < path.length; i += step) {
+                    const point = path[i];
+                    pathPoints.push(point.lat() + ',' + point.lng());
+                }
+
+                const markers = [
+                    `markers=color:green|label:A|${start.lat()},${start.lng()}`,
+                    `markers=color:red|label:B|${end.lat()},${end.lng()}`
+                ];
+                
+                const pathParam = `path=color:0x0000ff|weight:5|${pathPoints.join('|')}`;
+                
+                const baseUrl = 'https://maps.googleapis.com/maps/api/staticmap';
+                const params = [
+                    'size=600x300',
+                    'scale=2',
+                    markers.join('&'),
+                    pathParam,
+                    `key=${API_KEY}`
+                ];
+
+                currentMapUrl = `${baseUrl}?${params.join('&')}`;
+                return currentMapUrl;
+            } catch (error) {
+                console.error('Static map URL generation error:', error);
+                throw error;
+            }
+        }
+
+        function calculateRoute() {
+            try {
+                const start = document.getElementById('start').value;
+                const end = document.getElementById('end').value;
+
+                if (!start || !end) {
+                    throw new Error('請輸入起點和終點');
+                }
+
+                showLoading(true);
+                showDownloadControls(false);
+
+                const request = {
+                    origin: start,
+                    destination: end,
+                    travelMode: google.maps.TravelMode.DRIVING,
+                    optimizeWaypoints: true
+                };
+
+                directionsService.route(request, (result, status) => {
+                    try {
+                        if (status === 'OK') {
+                            directionsRenderer.setDirections(result);
+                            
+                            let totalDistance = 0;
+                            let totalDuration = 0;
+                            const legs = result.routes[0].legs;
+                            
+                            for (let i = 0; i < legs.length; i++) {
+                                totalDistance += legs[i].distance.value;
+                                totalDuration += legs[i].duration.value;
+                            }
+
+                            const distanceKm = (totalDistance / 1000).toFixed(1);
+                            const durationHours = (totalDuration / 3600).toFixed(1);
+
+                            const staticMapUrl = generateStaticMapUrl(result);
+                            console.log(staticMapUrl);
+                            document.getElementById('output').innerHTML = `
+                                <h3>路線資訊：</h3>
+                                <p>起點：${start}</p>
+                                <p>終點：${end}</p>
+                                <p>總距離：${distanceKm} 公里</p>
+                                <p>預計時間：${durationHours} 小時</p>
+                                <img id="static-map" src="${staticMapUrl}" alt="路線圖" 
+                                     onload="showLoading(false); showDownloadControls(true);" 
+                                     onerror="handleImageError()" />
+                            `;
+                        } else {
+                            throw new Error('無法計算路線: ' + status);
+                        }
+                    } catch (error) {
+                        showLoading(false);
+                        showDownloadControls(false);
+                        showError('產生路線圖失敗: ' + error.message);
+                        console.error('Route processing error:', error);
+                    }
+                });
+            } catch (error) {
+                showLoading(false);
+                showDownloadControls(false);
+                showError('計算路線失敗: ' + error.message);
+                console.error('Route calculation error:', error);
+            }
+        }
+
+        function handleImageError() {
+            showLoading(false);
+            showDownloadControls(false);
+            showError('無法載入路線圖片');
+            document.getElementById('static-map').style.display = 'none';
+        }
+
+        function loadGoogleMapsScript() {
+            const script = document.createElement('script');
+            script.src = `https://maps.googleapis.com/maps/api/js?key=${API_KEY}&libraries=places,geometry&callback=initMap`;
+            script.async = true;
+            script.defer = true;
+            script.onerror = () => showError('無法載入 Google Maps API');
+            document.body.appendChild(script);
+        }
+
+        window.onload = loadGoogleMapsScript;
+    </script>
+</body>
+</html>
